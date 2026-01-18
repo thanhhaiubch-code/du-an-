@@ -1,0 +1,81 @@
+name: Free VPS with VNC and SSH
+
+on:
+  workflow_dispatch:  # Chạy manual từ Actions tab
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # Max 6 hours
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+
+    - name: Update and install packages
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y xfce4 xfce4-goodies tightvncserver dbus-x11 x11-utils net-tools openssh-server curl unzip
+
+    - name: Setup VNC Server
+      env:
+        VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+      run: |
+        mkdir ~/.vnc
+        echo "$VNC_PASSWORD" | vncpasswd -f > ~/.vnc/passwd
+        chmod 600 ~/.vnc/passwd
+        echo '#!/bin/sh' > ~/.vnc/xstartup
+        echo 'xrdb $HOME/.Xresources' >> ~/.vnc/xstartup
+        echo 'startxfce4 &' >> ~/.vnc/xstartup
+        chmod +x ~/.vnc/xstartup
+        vncserver :1 -geometry 1280x800 -depth 24
+
+    - name: Setup SSH Server
+      env:
+        SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+      run: |
+        sudo mkdir /var/run/sshd
+        echo "root:$SSH_PASSWORD" | sudo chpasswd
+        sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+        sudo sed 's@session\s*required\s*pam_loginuid.so@session optional pam_loginuid.so@g' -i /etc/pam.d/sshd
+        sudo /usr/sbin/sshd
+
+    - name: Download and setup ngrok
+      env:
+        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+      run: |
+        curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+        echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+        sudo apt update && sudo apt install ngrok
+        ngrok authtoken $NGROK_AUTH_TOKEN
+
+    - name: Start ngrok tunnels
+      run: |
+        ngrok tcp 5901 --log=stdout > ngrok.log &  # For VNC
+        ngrok tcp 22 --log=stdout > ngrok_ssh.log &  # For SSH
+        sleep 10  # Wait for tunnels to start
+        echo "Ngrok tunnels started. Check logs for addresses."
+
+    - name: Display connection info
+      run: |
+        echo "VNC Address:"
+        curl --silent --show-error http://127.0.0.1:4040/api/tunnels | jq '.tunnels[] | select(.proto == "tcp") | .public_url' | grep 5901 || tail ngrok.log
+        echo "SSH Address:"
+        curl --silent --show-error http://127.0.0.1:4040/api/tunnels | jq '.tunnels[] | select(.proto == "tcp") | .public_url' | grep 22 || tail ngrok_ssh.log
+        echo "VNC: Use VNC Viewer, connect to tcp://<ngrok-host>:<port>, password: ${{ secrets.VNC_PASSWORD }}"
+        echo "SSH: ssh root@<ngrok-host> -p <port>, password: ${{ secrets.SSH_PASSWORD }}"
+
+    - name: Run your code here (example)
+      run: |
+        # Thêm code của bạn ở đây, ví dụ chạy Python script
+        sudo apt install -y python3
+        echo "print('Hello from worker VPS')" > test.py
+        python3 test.py
+        # Hoặc clone repo của bạn và run: git clone your-repo && cd repo && ./your-script.sh
+
+    - name: Keep alive
+      run: |
+        while true; do
+          echo "Keeping workflow alive..."
+          sleep 600  # 10 minutes
+        done
